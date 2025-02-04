@@ -26,6 +26,9 @@ user data structure
 for reference purposes mostly
 
 {
+    "indexes": {
+        "<session id>": "<user id>"
+    },
     "<user_id>": {
         "client": <openai client object>,
         "api": {
@@ -63,7 +66,9 @@ for reference purposes mostly
 }
 """
 
-user_data = {}
+user_data = {
+    "indexes": {}
+}
 
 bot = interactions.Client(intents=interactions.Intents.ALL)
 
@@ -132,6 +137,7 @@ async def chat_command(ctx: interactions.SlashContext):
     user_data[ctx.user.id]['chat'][thread.id]['support_vision'] = True
     user_data[ctx.user.id]['chat'][thread.id]['history'] = []
     user_data[ctx.user.id]['chat'][thread.id]['indexes'] = []
+    user_data['indexes'][thread.id] = ctx.user.id
     client: openai.AsyncOpenAI = user_data[ctx.user.id]['client']    
     test_image_data = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAAEnQAABJ0Ad5mH3gAAAEHSURBVFhH1ZIBDsMwCAPz/09vYhoVcbEJUddqJ2UNGIKXdrweZmDibsYYw36m9RVOOZbHHC7FoWIhxg7LGysDkS0DTDOUliENsGustA5bBiKoYVwhDTCUOYwrtgwY2XDPd5AG2L9kdGqdXnVBd7jR7xD83MDOFVe0TrvCAH5b5UeIcVanwB6slwayZ7avzGF9ZDIQG7J9rI37zADGLD9VZEOxIdat7NFcjD/r6IAmzEWYjoNQT+MpSJqwYRV2Fp6XGrgCH5YZmNbU9QD/bwCvOaI0R6qn90UOUzrLO1zZgA1ieYMr5AbkYURjeYMrG7BBLG9wpQm7HZZ3uNIgG7Lyygyt3sDjBt5XTrYB+/P3qwAAAABJRU5ErkJggg=="
     try:
@@ -222,11 +228,21 @@ async def chat_session_handler(ctx: interactions.api.events.MessageCreate):
             message_data = {
                 "role": "assistant",
                 "contents": {
-                    "text": final_response
+                    "text": final_response,
+                    "images": []
                 },
                 "message_id": response.id
             }
             user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['history'].append(message_data)
             user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['indexes'].append(response.id)
+            
+@interactions.listen(interactions.api.events.MessageDelete)
+async def message_deletion_handler(ctx: interactions.api.events.MessageDelete):
+    if hasattr(ctx.message.channel, "owner_id") and ctx.message.channel.owner_id == bot_id:
+        if ctx.message.channel.id in user_data['indexes'].keys():
+            user_id = user_data['indexes'][ctx.message.channel.id]
+            message_index = user_data[user_id]['chat'][ctx.message.channel.id]['indexes'].index(ctx.message.id)
+            user_data[user_id]['chat'][ctx.message.channel.id]['indexes'].pop(message_index)
+            user_data[user_id]['chat'][ctx.message.channel.id]['history'].pop(message_index)
         
 bot.start(token)
