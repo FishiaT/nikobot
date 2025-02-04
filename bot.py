@@ -141,6 +141,11 @@ async def chat_command(ctx: interactions.SlashContext):
     user_data[ctx.user.id]['chat'][thread.id]['selected_model'] = result.ctx.values[0]
     user_data[ctx.user.id]['chat'][thread.id]['support_vision'] = True
     user_data[ctx.user.id]['chat'][thread.id]['system_prompt'] = ""
+    user_data[ctx.user.id]['chat'][thread.id]['parameters'] = {
+        "stream": False,
+        "temperature": 0.8,
+        "seed": -1
+    }
     user_data[ctx.user.id]['chat'][thread.id]['history'] = []
     user_data[ctx.user.id]['chat'][thread.id]['indexes'] = []
     user_data['indexes'][thread.id] = ctx.user.id
@@ -191,7 +196,6 @@ async def system_prompt_command(ctx: interactions.SlashContext):
     if hasattr(ctx.channel, "owner_id") and ctx.channel.owner_id == bot_id and ctx.channel_id in user_data['indexes'].keys() and ctx.user.id == user_data['indexes'][ctx.channel.id]:
         modal = interactions.Modal(
             interactions.ParagraphText(
-                required=True,
                 custom_id="system_prompt",
                 label="System Prompt",
                 placeholder="You are a helpful AI assistant.",
@@ -203,6 +207,31 @@ async def system_prompt_command(ctx: interactions.SlashContext):
         modal_ctx: interactions.ModalContext = await bot.wait_for_modal(modal)
         user_data[ctx.user.id]['chat'][ctx.channel.id]['system_prompt'] = modal_ctx.responses['system_prompt']
         await modal_ctx.send(embed=interactions.Embed(description=":white_check_mark: Changed the system prompt!"))
+    else:
+        await ctx.send(embed=interactions.Embed(description=":x: You are not in a chat thread or are not the creator of this thread!"), ephemeral=True)
+        
+@interactions.slash_command(name="inference_parameters", description="Change inference parameters", scopes=server_ids)
+@interactions.slash_option(
+    name="stream",
+    description="Update response in real time",
+    opt_type=interactions.OptionType.BOOLEAN
+)
+@interactions.slash_option(
+    name="temperature",
+    description="Randomness of response (higher increases creativity and vice versa)",
+    opt_type=interactions.OptionType.NUMBER
+)
+@interactions.slash_option(
+    name="seed",
+    description="Seed for the Random Number Generator",
+    opt_type=interactions.OptionType.INTEGER
+)
+async def inference_parameters_command(ctx: interactions.SlashContext, stream: bool = False, temp: float = 0.8, seed: int = -1):
+    if hasattr(ctx.channel, "owner_id") and ctx.channel.owner_id == bot_id and ctx.channel_id in user_data['indexes'].keys() and ctx.user.id == user_data['indexes'][ctx.channel.id]:
+        user_data[ctx.user.id]['chat'][ctx.channel.id]['parameters']['stream'] = stream
+        user_data[ctx.user.id]['chat'][ctx.channel.id]['parameters']['temperature'] = temp
+        user_data[ctx.user.id]['chat'][ctx.channel.id]['parameters']['seed'] = seed
+        await ctx.send(embed=interactions.Embed(description=":white_check_mark: Updated inference parameters!"))
     else:
         await ctx.send(embed=interactions.Embed(description=":x: You are not in a chat thread or are not the creator of this thread!"), ephemeral=True)
     
@@ -260,11 +289,15 @@ async def chat_session_handler(ctx: interactions.api.events.MessageCreate):
             chat_completion = await client.chat.completions.create(
                 messages=messages,
                 model=user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['selected_model'],
-                stream=True
+                stream=True,
+                temperature=user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['parameters']['temperature'],
+                seed=user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['parameters']['seed']
             )
             final_response = ""
             async for chunk in chat_completion:
                 final_response += chunk.choices[0].delta.content or ""
+                if user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['parameters']['stream']:
+                    await response.edit(content=final_response)
             await response.edit(content=final_response)
             message_data = {
                 "role": "assistant",
