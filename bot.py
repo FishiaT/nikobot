@@ -7,6 +7,8 @@
 
 import interactions
 import openai
+import httpx
+import base64
 
 token = ''
 
@@ -32,20 +34,30 @@ for reference purposes mostly
             "models": [<list of models in string>]
         },
         "chat": {
-            "session_id": "<thread id>",
-            "selected_model": "<id of choosen model>",
-            "history": [
-                {
-                    "role": "<user | assistant>",
-                    "contents": {
-                        "text": "<message>",
-                        "images": [
-                            "<base64 encoded image>
-                        ]
-                    },
-                    "message_id": "<origin message id>"
-                }
-            ]
+            "<session_id>": {
+                "selected_model": "<id of choosen model>",
+                "support_vision": true | false,
+                "system_prompt": "<optional system prompt>",
+                "parameters": {}
+                "history": [
+                    {
+                        "role": "<user | assistant>",
+                        "contents": {
+                            "text": "<message>",
+                            "images": [
+                                {
+                                    "type": "<content type>",
+                                    "data": "<base64 encoded image data>"
+                                }
+                            ]
+                        },
+                        "message_id": "<origin message id>"
+                    }
+                ],
+                "indexes": [
+                    <message ids>
+                ]
+            }
         }
     }
 }
@@ -106,22 +118,50 @@ async def connect_command(ctx: interactions.SlashContext, url: str, api_key: str
     
 @interactions.slash_command(name="chat", description="Initiate a new chat session", scopes=server_ids)
 async def chat_command(ctx: interactions.SlashContext):
+    await ctx.defer(ephemeral=True)
     if not ctx.user.id in user_data.keys() or not user_data[ctx.user.id]['api']['url']:
         embed = interactions.Embed(description=":x: You have not yet connected to an LLM API. In order to start a chat session, please connect to an API by using the `/connect` command.")
         await ctx.send(embed=embed, ephemeral=True)
         return
     model_select = interactions.StringSelectMenu(user_data[ctx.user.id]['api']['models'], placeholder="Pick a model")
-    message = await ctx.send(embed=interactions.Embed(description="Please choose a model to use."), components=model_select, ephemeral=True)
+    message = await ctx.send(embed=interactions.Embed(description="Please choose a model to use.\n\nAfter choosing a model, it may take a while before the session is created. A new message will be sent to notify you once that's done."), components=model_select)
     result: interactions.api.events.Component = await bot.wait_for_component(messages=message, components=model_select)
-    user_data[ctx.user.id]['chat']['selected_model'] = result.ctx.values[0]
-    thread = await ctx.channel.create_private_thread(name=f"{ctx.user.display_name} ({ctx.user.id})'s Chat Session")
-    embed = interactions.Embed(description=f"Chat session initiated, you may now start interacting with the choosen LLM model by sending messages in this thread.\n\n• Thread ID: {thread.id}\n• Selected Model: {user_data[ctx.user.id]['chat']['selected_model']}")
-    user_data[ctx.user.id]['chat']['session_id'] = thread.id
-    user_data[ctx.user.id]['chat']['history'] = []
+    thread = await ctx.channel.create_private_thread(name=f"{ctx.user.display_name}'s Chat Session")
+    user_data[ctx.user.id]['chat'][thread.id] = {}
+    user_data[ctx.user.id]['chat'][thread.id]['selected_model'] = result.ctx.values[0]
+    user_data[ctx.user.id]['chat'][thread.id]['support_vision'] = True
+    user_data[ctx.user.id]['chat'][thread.id]['history'] = []
+    user_data[ctx.user.id]['chat'][thread.id]['indexes'] = []
+    client: openai.AsyncOpenAI = user_data[ctx.user.id]['client']    
+    test_image_data = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAAEnQAABJ0Ad5mH3gAAAEHSURBVFhH1ZIBDsMwCAPz/09vYhoVcbEJUddqJ2UNGIKXdrweZmDibsYYw36m9RVOOZbHHC7FoWIhxg7LGysDkS0DTDOUliENsGustA5bBiKoYVwhDTCUOYwrtgwY2XDPd5AG2L9kdGqdXnVBd7jR7xD83MDOFVe0TrvCAH5b5UeIcVanwB6slwayZ7avzGF9ZDIQG7J9rI37zADGLD9VZEOxIdat7NFcjD/r6IAmzEWYjoNQT+MpSJqwYRV2Fp6XGrgCH5YZmNbU9QD/bwCvOaI0R6qn90UOUzrLO1zZgA1ieYMr5AbkYURjeYMrG7BBLG9wpQm7HZZ3uNIgG7Lyygyt3sDjBt5XTrYB+/P3qwAAAABJRU5ErkJggg=="
+    try:
+        test_request = await client.chat.completions.create(
+            model=user_data[ctx.user.id]['chat'][thread.id]['selected_model'],
+            messages=[
+                {
+                   "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "What's being shown in this image?"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{test_image_data}"
+                            }
+                        }
+                    ]
+                }
+            ]
+        )
+    except openai.BadRequestError:
+        user_data[ctx.user.id]['chat'][thread.id]['support_vision'] = False
     await thread.add_member(ctx.user)
+    embed = interactions.Embed(description=f"Chat session initiated, you may now start interacting with the choosen LLM model by sending messages in this thread.\n\n• Thread ID: {thread.id}\n• Selected Model: {user_data[ctx.user.id]['chat'][thread.id]['selected_model']}\n• Support image attachments: {user_data[ctx.user.id]['chat'][thread.id]['support_vision']}")
     await thread.send(embed=embed)
     await message.delete(context=ctx)
-    await ctx.send(embed=interactions.Embed(description=f":white_check_mark: Created a new thread ({thread.id})!"), ephemeral=True)
+    await ctx.send(embed=interactions.Embed(description=f":white_check_mark: Created a new thread ({thread.id})!"))
     
 @interactions.listen(interactions.api.events.MessageCreate)
 async def chat_session_handler(ctx: interactions.api.events.MessageCreate):
@@ -130,29 +170,51 @@ async def chat_session_handler(ctx: interactions.api.events.MessageCreate):
             message_data = {
                 "role": "user",
                 "contents": {
-                    "text": ctx.message.content
+                    "text": ctx.message.content,
+                    "images": []
                 },
                 "message_id": ctx.message.id
             }
-            if len(ctx.message.attachments) > 0:
-                # TODO: add handler for attachments
-                print("not implemented (attachments)")
-            user_data[ctx.message.author.id]['chat']['history'].append(message_data)
+            if user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['support_vision'] and len(ctx.message.attachments) > 0:
+                for a in ctx.message.attachments:
+                    if "image" in a.content_type:
+                        image_data = {
+                            "type": a.content_type,
+                            "data": base64.b64encode(httpx.get(a.url).content).decode('utf-8')
+                        }
+                        message_data['contents']['images'].append(image_data)
+                    else:
+                        # TODO: support docs/txt files
+                        # maybe some RAG-based solutions could be implemented here
+                        print(f"{a.content_type} not implemented")
+            user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['history'].append(message_data)
+            user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['indexes'].append(ctx.message.id)
             client: openai.AsyncOpenAI = user_data[ctx.message.author.id]['client']
+            response: interactions.Message = await ctx.message.channel.send(":watch: Please wait...")
             messages = []
-            for message in user_data[ctx.message.author.id]['chat']['history']:
+            for message in user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['history']:
                 data = {
                     "role": message['role'],
-                    "content": ""
+                    "content": []
                 }
-                data['content'] = message['contents']['text']
+                data['content'].append({
+                    "type": "text",
+                    "text": message['contents']['text']
+                })
+                if len(message['contents']['images']) > 0:
+                    for image in message['contents']['images']:
+                        data['content'].append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{image['type']};base64,{image['data']}"
+                            }
+                        })
                 messages.append(data)
             chat_completion = await client.chat.completions.create(
                 messages=messages,
-                model=user_data[ctx.message.author.id]['chat']['selected_model'],
+                model=user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['selected_model'],
                 stream=True
             )
-            response: interactions.Message = await ctx.message.channel.send("Please wait...")
             final_response = ""
             async for chunk in chat_completion:
                 final_response += chunk.choices[0].delta.content or ""
@@ -164,6 +226,7 @@ async def chat_session_handler(ctx: interactions.api.events.MessageCreate):
                 },
                 "message_id": response.id
             }
-            user_data[ctx.message.author.id]['chat']['history'].append(message_data)
+            user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['history'].append(message_data)
+            user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['indexes'].append(response.id)
         
 bot.start(token)
