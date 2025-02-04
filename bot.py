@@ -29,6 +29,9 @@ for reference purposes mostly
     "indexes": {
         "<session id>": "<user id>"
     },
+    "terminated": [
+        "<terminated session ids>"
+    ]
     "<user_id>": {
         "client": <openai client object>,
         "api": {
@@ -67,9 +70,12 @@ for reference purposes mostly
 """
 
 user_data = {
-    "indexes": {}
+    "indexes": {},
+    "terminated": []
 }
 
+# TODO: only use necessary intents
+# until i stop being a lazyass this should suffice
 bot = interactions.Client(intents=interactions.Intents.ALL)
 
 @interactions.listen()
@@ -134,6 +140,7 @@ async def chat_command(ctx: interactions.SlashContext):
     user_data[ctx.user.id]['chat'][thread.id] = {}
     user_data[ctx.user.id]['chat'][thread.id]['selected_model'] = result.ctx.values[0]
     user_data[ctx.user.id]['chat'][thread.id]['support_vision'] = True
+    user_data[ctx.user.id]['chat'][thread.id]['system_prompt'] = ""
     user_data[ctx.user.id]['chat'][thread.id]['history'] = []
     user_data[ctx.user.id]['chat'][thread.id]['indexes'] = []
     user_data['indexes'][thread.id] = ctx.user.id
@@ -163,15 +170,46 @@ async def chat_command(ctx: interactions.SlashContext):
     except openai.BadRequestError:
         user_data[ctx.user.id]['chat'][thread.id]['support_vision'] = False
     await thread.add_member(ctx.user)
-    embed = interactions.Embed(description=f"Chat session initiated, you may now start interacting with the choosen LLM model by sending messages in this thread.\n\n• Selected Model: {user_data[ctx.user.id]['chat'][thread.id]['selected_model']}\n• Support image attachments: {user_data[ctx.user.id]['chat'][thread.id]['support_vision']}")
+    embed = interactions.Embed(description=f"Chat session initiated, you may now start interacting with the choosen LLM model by sending messages in this thread.\n\nWhile you are in this thread, you may also use special commands to change the inference parameters, modify the system prompt, and terminate this session!\n\n• Selected Model: {user_data[ctx.user.id]['chat'][thread.id]['selected_model']}\n• Support image attachments: {user_data[ctx.user.id]['chat'][thread.id]['support_vision']}")
     await thread.send(embed=embed)
     await status_message.delete(context=ctx)
     await ctx.send(embed=interactions.Embed(description=f":white_check_mark: Chat session created!"), ephemeral=True)
     
+@interactions.slash_command(name="terminate", description="Terminate current chat session", scopes=server_ids)
+async def terminate_command(ctx: interactions.SlashContext):
+    if hasattr(ctx.channel, "owner_id") and ctx.channel.owner_id == bot_id and ctx.channel_id in user_data['indexes'].keys() and ctx.user.id == user_data['indexes'][ctx.channel.id]:
+        user_data['indexes'].pop(ctx.channel_id)
+        user_data[ctx.user.id]['chat'].pop(ctx.channel_id)
+        user_data['terminated'].append(ctx.channel_id)
+        await ctx.send(embed=interactions.Embed(description=":white_check_mark: Terminated current session."))
+        await ctx.channel.archive(locked=True)
+    else:
+        await ctx.send(embed=interactions.Embed(description=":x: You are not in a chat thread or are not the creator of this thread!"), ephemeral=True)
+        
+@interactions.slash_command(name="system_prompt", description="Change the system prompt of the current session", scopes=server_ids)
+async def system_prompt_command(ctx: interactions.SlashContext):
+    if hasattr(ctx.channel, "owner_id") and ctx.channel.owner_id == bot_id and ctx.channel_id in user_data['indexes'].keys() and ctx.user.id == user_data['indexes'][ctx.channel.id]:
+        modal = interactions.Modal(
+            interactions.ParagraphText(
+                required=True,
+                custom_id="system_prompt",
+                label="System Prompt",
+                placeholder="You are a helpful AI assistant.",
+                value=user_data[ctx.user.id]['chat'][ctx.channel_id]['system_prompt']
+            ),
+            title="System Prompt"
+        )
+        await ctx.send_modal(modal)
+        modal_ctx: interactions.ModalContext = await bot.wait_for_modal(modal)
+        user_data[ctx.user.id]['chat'][ctx.channel.id]['system_prompt'] = modal_ctx.responses['system_prompt']
+        await modal_ctx.send(embed=interactions.Embed(description=":white_check_mark: Changed the system prompt!"))
+    else:
+        await ctx.send(embed=interactions.Embed(description=":x: You are not in a chat thread or are not the creator of this thread!"), ephemeral=True)
+    
 @interactions.listen(interactions.api.events.MessageCreate)
 async def chat_session_handler(ctx: interactions.api.events.MessageCreate):
     if hasattr(ctx.message.channel, "owner_id") and ctx.message.channel.owner_id == bot_id:
-        if ctx.message.author.id != bot_id:
+        if ctx.message.author.id != bot_id and ctx.message.author.id == user_data['indexes'][ctx.message.channel.id] and not ctx.message.channel.id in user_data['terminated']:
             message_data = {
                 "role": "user",
                 "contents": {
@@ -197,6 +235,10 @@ async def chat_session_handler(ctx: interactions.api.events.MessageCreate):
             client: openai.AsyncOpenAI = user_data[ctx.message.author.id]['client']
             response: interactions.Message = await ctx.message.channel.send(":watch: Please wait, this may take a while...")
             messages = []
+            messages.append({
+                "role": "system",
+                "content": user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['system_prompt']
+            })
             for message in user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['history']:
                 data = {
                     "role": message['role'],
