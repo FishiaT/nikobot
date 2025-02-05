@@ -103,7 +103,13 @@ async def about_command(ctx: interactions.SlashContext):
 async def connect_command(ctx: interactions.SlashContext, url: str, api_key: str = "NO_API_KEY"):
     await ctx.defer(ephemeral=True)
     client = openai.Client(base_url=url, api_key=api_key)
-    models = client.models.list().to_dict()
+    try:
+        models = client.models.list().to_dict()
+    except openai.AuthenticationError:
+        embed = interactions.Embed(title="Failed :x:", description=f"Unable to connect to `{url}`. Invalid or no API key specified.")
+        await ctx.send(embed=embed)
+        client.close()
+        return
     if "data" in models.keys() and len(models['data']) > 0:
         user_data[ctx.user.id] = {}
         user_data[ctx.user.id]['api'] = llm_settings.copy()
@@ -121,7 +127,7 @@ async def connect_command(ctx: interactions.SlashContext, url: str, api_key: str
         embed = interactions.Embed(title="Success :white_check_mark:", description=embed_description)
         await ctx.send(embed=embed)
     else:
-        embed = interactions.Embed(title="Failed :x:", description=f"Unable to connect to `{url}`.\n\nPlease check the URL or the API key to see if they are correct or not. Try appending `/v1` to the API url if you are sure that the URL used is the correct one.")
+        embed = interactions.Embed(title="Failed :x:", description=f"Unable to connect to `{url}`. Failed to fetch models.")
         await ctx.send(embed=embed)
     client.close()
     
@@ -196,6 +202,7 @@ async def system_prompt_command(ctx: interactions.SlashContext):
     if hasattr(ctx.channel, "owner_id") and ctx.channel.owner_id == bot_id and ctx.channel_id in user_data['indexes'].keys() and ctx.user.id == user_data['indexes'][ctx.channel.id]:
         modal = interactions.Modal(
             interactions.ParagraphText(
+                required=False,
                 custom_id="system_prompt",
                 label="System Prompt",
                 placeholder="You are a helpful AI assistant.",
@@ -206,14 +213,14 @@ async def system_prompt_command(ctx: interactions.SlashContext):
         await ctx.send_modal(modal)
         modal_ctx: interactions.ModalContext = await bot.wait_for_modal(modal)
         user_data[ctx.user.id]['chat'][ctx.channel.id]['system_prompt'] = modal_ctx.responses['system_prompt']
-        await modal_ctx.send(embed=interactions.Embed(description=":white_check_mark: Changed the system prompt!"))
+        await modal_ctx.send(embed=interactions.Embed(description=":white_check_mark: Changed the system prompt!"), delete_after=10)
     else:
         await ctx.send(embed=interactions.Embed(description=":x: You are not in a chat thread or are not the creator of this thread!"), ephemeral=True)
         
 @interactions.slash_command(name="inference_parameters", description="Change inference parameters", scopes=server_ids)
 @interactions.slash_option(
     name="stream",
-    description="Update response in real time",
+    description="Update response in real time (NOT OPTIMIZED)",
     opt_type=interactions.OptionType.BOOLEAN
 )
 @interactions.slash_option(
@@ -231,7 +238,7 @@ async def inference_parameters_command(ctx: interactions.SlashContext, stream: b
         user_data[ctx.user.id]['chat'][ctx.channel.id]['parameters']['stream'] = stream
         user_data[ctx.user.id]['chat'][ctx.channel.id]['parameters']['temperature'] = temp
         user_data[ctx.user.id]['chat'][ctx.channel.id]['parameters']['seed'] = seed
-        await ctx.send(embed=interactions.Embed(description=":white_check_mark: Updated inference parameters!"))
+        await ctx.send(embed=interactions.Embed(description=":white_check_mark: Updated inference parameters!"), delete_after=10)
     else:
         await ctx.send(embed=interactions.Embed(description=":x: You are not in a chat thread or are not the creator of this thread!"), ephemeral=True)
     
@@ -264,27 +271,32 @@ async def chat_session_handler(ctx: interactions.api.events.MessageCreate):
             client: openai.AsyncOpenAI = user_data[ctx.message.author.id]['client']
             response: interactions.Message = await ctx.message.channel.send(":watch: Please wait, this may take a while...")
             messages = []
-            messages.append({
-                "role": "system",
-                "content": user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['system_prompt']
-            })
+            if user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['system_prompt']:
+                messages.append({
+                    "role": "system",
+                    "content": user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['system_prompt']
+                })
             for message in user_data[ctx.message.author.id]['chat'][ctx.message.channel.id]['history']:
                 data = {
-                    "role": message['role'],
-                    "content": []
+                    "role": message['role']
                 }
-                data['content'].append({
-                    "type": "text",
-                    "text": message['contents']['text']
-                })
-                if len(message['contents']['images']) > 0:
-                    for image in message['contents']['images']:
+                match(message['role']):
+                    case "user":
+                        data['content'] = []
                         data['content'].append({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{image['type']};base64,{image['data']}"
-                            }
+                            "type": "text",
+                            "text": message['contents']['text']
                         })
+                        if len(message['contents']['images']) > 0:
+                            for image in message['contents']['images']:
+                                data['content'].append({
+                                    "type": "image_url",
+                                    "image_url": {
+                                       "url": f"data:{image['type']};base64,{image['data']}"
+                                    }
+                                })
+                    case "assistant":
+                        data['content'] = message['contents']['text']
                 messages.append(data)
             chat_completion = await client.chat.completions.create(
                 messages=messages,
