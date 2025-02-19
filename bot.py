@@ -110,6 +110,11 @@ async def connect_command(ctx: interactions.SlashContext, url: str, api_key: str
         await ctx.send(embed=embed)
         client.close()
         return
+    except openai.APIConnectionError:
+        embed = interactions.Embed(title="Failed :x:", description=f"Unable to connect to `{url}`. Please check if the provided URL is correct.")
+        await ctx.send(embed=embed)
+        client.close()
+        return
     if "data" in models.keys() and len(models['data']) > 0:
         user_data[ctx.user.id] = {}
         user_data[ctx.user.id]['api'] = llm_settings.copy()
@@ -133,6 +138,10 @@ async def connect_command(ctx: interactions.SlashContext, url: str, api_key: str
     
 @interactions.slash_command(name="chat", description="Initiate a new chat session", scopes=server_ids)
 async def chat_command(ctx: interactions.SlashContext):
+    if hasattr(ctx.channel, "owner_id") and ctx.channel.owner_id == bot_id:
+        embed = interactions.Embed(description=":x: This command cannot be ran in a chat session.")
+        await ctx.send(embed=embed, ephemeral=True)
+        return
     if not ctx.user.id in user_data.keys() or not user_data[ctx.user.id]['api']['url']:
         embed = interactions.Embed(description=":x: You have not yet connected to an LLM API. In order to start a chat session, please connect to an API by using the `/connect` command.")
         await ctx.send(embed=embed, ephemeral=True)
@@ -178,8 +187,13 @@ async def chat_command(ctx: interactions.SlashContext):
                 }
             ]
         )
-    except openai.BadRequestError:
-        user_data[ctx.user.id]['chat'][thread.id]['support_vision'] = False
+    except openai.BadRequestError as e:
+        if "must be a string" in e.body:
+            # assume no image or other file type
+            user_data[ctx.user.id]['chat'][thread.id]['support_vision'] = False
+        else:
+            # TODO: handle non-instruct models (e.g. whisper)
+            print(f"{e.body} not implemented")
     await thread.add_member(ctx.user)
     embed = interactions.Embed(description=f"Chat session initiated, you may now start interacting with the choosen LLM model by sending messages in this thread.\n\nWhile you are in this thread, you may also use special commands to change the inference parameters, modify the system prompt, and terminate this session!\n\n• Selected Model: {user_data[ctx.user.id]['chat'][thread.id]['selected_model']}\n• Support image attachments: {user_data[ctx.user.id]['chat'][thread.id]['support_vision']}")
     await thread.send(embed=embed)
